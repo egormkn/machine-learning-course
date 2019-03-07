@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.12)
+
+project(spearman_rank_correlation_coefficient)
+
+add_executable(spearman_rank_correlation_coefficient main.cpp)
