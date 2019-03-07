@@ -3,6 +3,8 @@ project(machine_learning_course)
 
 set(CMAKE_CXX_STANDARD 17)
 
+add_compile_options("$<$<CONFIG:DEBUG>:-DDEBUG>")
+
 add_subdirectory(01-cross-validation)
 add_subdirectory(02-f1-score)
 add_subdirectory(03-metric-based-classification)
