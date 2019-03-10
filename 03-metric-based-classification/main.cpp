@@ -1,5 +1,4 @@
 #include <utility>
-
 #include <random>
 #include <iostream>
 #include <fstream>
@@ -9,8 +8,6 @@
 #include <memory>
 
 using namespace std;
-
-auto random_generator = mt19937(random_device()()); // NOLINT(cert-err58-cpp)
 
 typedef double feature_t;
 
@@ -78,24 +75,34 @@ namespace metric {
         return result;
     }
 
+    // sum [a_i == b_i]
+    double hamming(const object &a, const object &b) {
+        const size_t m = min(a.size(), b.size());
+        double result = 0;
+        for (size_t i = 0; i < m; ++i) {
+            result += fabs(a[i] - b[i]) < epsilon ? 1 : 0;
+        }
+        return result;
+    }
+
     // sum |a_i - b_i|/(|a_i| + |b_i|)
     double canberra(const object &a, const object &b) {
         const size_t m = min(a.size(), b.size());
         double result = 0;
         for (size_t i = 0; i < m; ++i) {
-            result += fabs(a[i] - b[i]) / (fabs(a[i]) + fabs(b[i]));
+            double denominator = fabs(a[i]) + fabs(b[i]);
+            result += denominator < epsilon ? 0 : fabs(a[i] - b[i]) / denominator;
         }
         return result;
     }
 
-    // 1/2 * sum (a_i - b_i)^2 / (a_i + b_i)
+    // 1/2 * sum (a_i - b_i)^2 / (a_i + b_i)^2
     double chi_square(const object &a, const object &b) {
         const size_t m = min(a.size(), b.size());
         double result = 0;
         for (size_t i = 0; i < m; ++i) {
-            double denominator = a[i] + b[i];
-            if (denominator < epsilon) return INFINITY;
-            result += pow(a[i] - b[i], 2.0f) / denominator;
+            double denominator = pow(a[i] + b[i], 2.0f);
+            result += denominator < epsilon ? 0 : pow(a[i] - b[i], 2.0f) / denominator;
         }
         return result / 2.0f;
     }
@@ -108,22 +115,34 @@ namespace metric {
             numerator += fabs(a[i] - b[i]);
             denominator += a[i] + b[i];
         }
+        if (fabs(denominator) < epsilon) return INFINITY;
         return numerator / denominator;
     }
 
-    // 1 - sum (a_i * b_i) / sqrt(sum a_i^2 * sum b_i^2)
+    // arccos(sum (a_i * b_i) / (sqrt(sum a_i^2) * sqrt(sum b_i^2)))
     double cosine_similarity(const object &a, const object &b) {
         const size_t m = min(a.size(), b.size());
         double numerator = 0, sum_a = 0, sum_b = 0;
         for (size_t i = 0; i < m; ++i) {
             numerator += a[i] * b[i];
-            sum_a += a[i] * a[i];
-            sum_b += b[i] * b[i];
+            sum_a += pow(a[i], 2.0f);
+            sum_b += pow(b[i], 2.0f);
         }
-        double denominator = sqrt(sum_a * sum_b);
-        if (denominator < epsilon) return 0.0;
-        return 1 - numerator / denominator;
+        double denominator = sqrt(sum_a) * sqrt(sum_b);
+        return denominator < epsilon ? 0.0 : acos(numerator / denominator);
     }
+
+    const vector<metric_t> all = { // NOLINT(cert-err58-cpp)
+            metric::euclidean,
+            metric::normalized_euclidean,
+            metric::chebyshev,
+            metric::manhattan,
+            metric::hamming,
+            metric::canberra,
+            /*metric::chi_square,
+            metric::lance_willams,*/
+            metric::cosine_similarity
+    };
 }
 
 typedef function<double(double)> kernel_t;
@@ -171,6 +190,108 @@ namespace kernel {
     double sigmoid(double x) {
         return 2 / PI / (exp(x) + exp(-x));
     }
+
+    const vector<kernel_t> all = { // NOLINT(cert-err58-cpp)
+            kernel::uniform,
+            kernel::triangular,
+            kernel::epanechnikov,
+            kernel::biweight,
+            kernel::triweight,
+            kernel::tricube,
+            kernel::gaussian,
+            kernel::cosine,
+            kernel::logistic,
+            kernel::sigmoid
+    };
+}
+
+typedef function<void(size_t features_size, vector<object> &, vector<object> &)> normalization_t;
+
+namespace normalization {
+
+    void minimax(size_t features_size, vector<object> &train_set, vector<object> &test_set) {
+        const auto m = features_size;
+        const auto n = train_set.size();
+        const auto q = test_set.size();
+
+        vector<feature_t> max_features(m, numeric_limits<feature_t>::min());
+        vector<feature_t> min_features(m, numeric_limits<feature_t>::max());
+
+        for (const object &object : train_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                max_features[feature_id] = max(max_features[feature_id], object[feature_id]);
+                min_features[feature_id] = min(min_features[feature_id], object[feature_id]);
+            }
+        }
+        for (const object &object : test_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                max_features[feature_id] = max(max_features[feature_id], object[feature_id]);
+                min_features[feature_id] = min(min_features[feature_id], object[feature_id]);
+            }
+        }
+
+        for (object &object : train_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                object[feature_id] -= min_features[feature_id];
+                object[feature_id] /= max_features[feature_id] - min_features[feature_id];
+            }
+        }
+
+        for (object &object : test_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                object[feature_id] -= min_features[feature_id];
+                object[feature_id] /= max_features[feature_id] - min_features[feature_id];
+            }
+        }
+    }
+
+    void z_mean(size_t features_size, vector<object> &train_set, vector<object> &test_set) {
+        const auto m = features_size;
+        const auto n = train_set.size();
+        const auto q = test_set.size();
+
+        vector<double> mean_features(m, 0);
+        for (const object &object : train_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                mean_features[feature_id] += object[feature_id];
+            }
+        }
+        for (const object &object : test_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                mean_features[feature_id] += object[feature_id];
+            }
+        }
+        for (double &mean : mean_features) {
+            mean /= n + q;
+        }
+
+        vector<double> deviation_features(m, 0);
+        for (const object &object : train_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                deviation_features[feature_id] += pow(object[feature_id] - mean_features[feature_id], 2) / (n + q - 1);
+            }
+        }
+        for (const object &object : test_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                deviation_features[feature_id] += pow(object[feature_id] - mean_features[feature_id], 2) / (n + q - 1);
+            }
+        }
+        for (double &deviation : deviation_features) {
+            deviation = sqrt(deviation);
+        }
+        for (object &object : train_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                object[feature_id] -= mean_features[feature_id];
+                object[feature_id] /= deviation_features[feature_id];
+            }
+        }
+        for (object &object : test_set) {
+            for (int feature_id = 0; feature_id < m; ++feature_id) {
+                object[feature_id] -= mean_features[feature_id];
+                object[feature_id] /= deviation_features[feature_id];
+            }
+        }
+    }
 }
 
 namespace score {
@@ -205,25 +326,28 @@ namespace score {
 
 class knn_classifier {
 public:
-    static knn_classifier make_classifier(size_t class_size, const vector<object> &samples) {
-        const size_t n = samples.size();
+    static knn_classifier make_classifier(size_t features_size, size_t class_size, const vector<object> &samples) {
+        const size_t m = features_size;
         const size_t k = class_size;
+        const size_t n = samples.size();
 
-        vector<unsigned> neighbors;
-        for (unsigned i = 1; neighbors.size() < 4; i += 2) {
-            neighbors.emplace_back(i);
-        }
+        vector<metric_t> metrics(metric::all);
+        vector<kernel_t> kernels(kernel::all);
+        vector<size_t> neighbors = {1, 3, 5, 7};
+
+        auto random_generator = mt19937(random_device()());
+        shuffle(metrics.begin(), metrics.end(), random_generator);
+        shuffle(kernels.begin(), kernels.end(), random_generator);
         shuffle(neighbors.begin(), neighbors.end(), random_generator);
 
         vector<vector<unsigned>> confusion_matrix(k);
 
-        double best_score = 0;
-        double best_margin = 0;
         unique_ptr<knn_classifier> best_classifier;
-
+        double best_score = numeric_limits<double>::min();
         metric_t best_metric = nullptr;
         kernel_t best_kernel = nullptr;
         size_t best_neighbor = 0;
+        vector<object> best_samples;
 
         // Optimize hyperparameters
         for (const auto &metric : metrics) {
@@ -245,6 +369,7 @@ public:
                     // Check score
                     double score = score::f1_micro(confusion_matrix);
                     if (score > best_score) {
+                        // cerr << "New score: " << score << endl;
                         best_score = score;
                         best_metric = metric;
                         best_kernel = kernel;
@@ -256,7 +381,10 @@ public:
         }
 
         // Prototype selection
-        vector<object> best_samples;
+
+        /*
+        cerr << "Samples size: " << samples.size() << endl;
+
         for (unsigned i = 0; i < n; ++i) {
             if (best_classifier->get_margin(samples[i], i) > 0) {
                 best_samples.push_back(samples[i]);
@@ -267,7 +395,10 @@ public:
             best_neighbor = best_samples.size() - 1;
         }
 
-        return knn_classifier(best_samples, best_metric, best_kernel, best_neighbor);
+        cerr << "Reduced samples size: " << best_samples.size() << endl;
+        */
+
+        return knn_classifier(samples, best_metric, best_kernel, best_neighbor);
     }
 
     knn_classifier(vector<object> samples, metric_t metric, kernel_t kernel, size_t neighbor) :
@@ -300,15 +431,7 @@ public:
         return result.str();
     }
 
-    static void initialize() {
-        shuffle(metrics.begin(), metrics.end(), random_generator);
-        shuffle(kernels.begin(), kernels.end(), random_generator);
-    }
-
 private:
-    static vector<metric_t> metrics;
-    static vector<kernel_t> kernels;
-
     const vector<object> samples;
     const metric_t metric;
     const kernel_t kernel;
@@ -352,30 +475,6 @@ private:
     }
 };
 
-vector<metric_t> knn_classifier::metrics = { // NOLINT(cert-err58-cpp)
-        metric::euclidean,
-        metric::normalized_euclidean,
-        metric::chebyshev,
-        metric::manhattan,
-        metric::canberra,
-        metric::chi_square,
-        metric::lance_willams,
-        metric::cosine_similarity
-};
-
-vector<kernel_t> knn_classifier::kernels = { // NOLINT(cert-err58-cpp)
-        kernel::uniform,
-        kernel::triangular,
-        kernel::epanechnikov,
-        kernel::biweight,
-        kernel::triweight,
-        kernel::tricube,
-        kernel::gaussian,
-        kernel::cosine,
-        kernel::logistic,
-        kernel::sigmoid
-};
-
 void solve() {
     /**
      * m - number of features
@@ -385,22 +484,17 @@ void solve() {
     size_t m, k, n;
     cin >> m >> k >> n;
 
-    vector<feature_t> max_features(m, numeric_limits<feature_t>::min());
-    vector<feature_t> min_features(m, numeric_limits<feature_t>::max());
-
-    vector<object> samples;
+    vector<object> train_set;
 
     // Read training samples
     for (int object_id = 0; object_id < n; ++object_id) {
         vector<feature_t> features(m);
         for (int feature_id = 0; feature_id < m; ++feature_id) {
             cin >> features[feature_id];
-            max_features[feature_id] = max(max_features[feature_id], features[feature_id]);
-            min_features[feature_id] = min(min_features[feature_id], features[feature_id]);
         }
         class_t class_id;
         cin >> class_id;
-        samples.emplace_back(object_id, features, class_id - 1);
+        train_set.emplace_back(object_id, features, class_id - 1);
     }
 
     /**
@@ -409,37 +503,21 @@ void solve() {
     size_t q;
     cin >> q;
 
-    vector<object> tests;
+    vector<object> test_set;
 
     // Read tests
     for (int object_id = 0; object_id < q; ++object_id) {
         vector<feature_t> features(m);
         for (int feature_id = 0; feature_id < m; ++feature_id) {
             cin >> features[feature_id];
-            max_features[feature_id] = max(max_features[feature_id], features[feature_id]);
-            min_features[feature_id] = min(min_features[feature_id], features[feature_id]);
         }
-        tests.emplace_back(object_id, features, 0);
+        test_set.emplace_back(object_id, features, 0);
     }
 
-    // Normalize features (minimax)
-    for (object &sample : samples) {
-        for (int feature_id = 0; feature_id < m; ++feature_id) {
-            sample[feature_id] -= min_features[feature_id];
-            sample[feature_id] /= max_features[feature_id] - min_features[feature_id];
-        }
-    }
+    normalization::z_mean(m, train_set, test_set);
 
-    for (object &test : tests) {
-        for (int feature_id = 0; feature_id < m; ++feature_id) {
-            test[feature_id] -= min_features[feature_id];
-            test[feature_id] /= max_features[feature_id] - min_features[feature_id];
-        }
-    }
-
-    knn_classifier::initialize();
-    auto classifier = knn_classifier::make_classifier(k, samples);
-    for (const object &test : tests) {
+    auto classifier = knn_classifier::make_classifier(m, k, train_set);
+    for (const object &test : test_set) {
         cout << classifier.info(test) << endl;
     }
 }
