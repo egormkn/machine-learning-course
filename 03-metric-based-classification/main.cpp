@@ -1,7 +1,8 @@
+#include <utility>
+
 #include <random>
 #include <iostream>
 #include <fstream>
-#include <array>
 #include <functional>
 #include <sstream>
 #include <iomanip>
@@ -9,18 +10,24 @@
 
 using namespace std;
 
+auto random_generator = mt19937(random_device()()); // NOLINT(cert-err58-cpp)
+
 typedef double feature_t;
 
 typedef int class_t;
 
 class object {
 private:
+    size_t index;
     vector<feature_t> features;
     class_t class_id;
 public:
-    object(vector<feature_t> features, class_t class_id) : features(move(features)), class_id(class_id) {}
+    object(size_t index, vector<feature_t> features, class_t class_id) :
+            index(index), features(move(features)), class_id(class_id) {}
 
     size_t size() const { return features.size(); }
+
+    size_t get_index() const { return index; }
 
     feature_t &operator[](size_t index) { return features[index]; }
 
@@ -33,7 +40,7 @@ typedef function<double(const object &, const object &)> metric_t;
 
 namespace metric {
 
-    const double epsilon = 1e-10;
+    const double epsilon = 1e-15;
 
     // sqrt(sum (a_i - b_i)^2)
     double euclidean(const object &a, const object &b) {
@@ -198,31 +205,32 @@ namespace score {
 
 class knn_classifier {
 public:
-    static unique_ptr<knn_classifier> make_classifier(size_t class_size, const vector<object> &samples) {
+    static knn_classifier make_classifier(size_t class_size, const vector<object> &samples) {
         const size_t n = samples.size();
         const size_t k = class_size;
 
-        vector<vector<double>> distance(n);
-        for (unsigned i = 0; i < n; ++i) {
-            distance[i].resize(n);
+        vector<unsigned> neighbors;
+        for (unsigned i = 1; neighbors.size() < 4; i += 2) {
+            neighbors.emplace_back(i);
         }
+        shuffle(neighbors.begin(), neighbors.end(), random_generator);
 
         vector<vector<unsigned>> confusion_matrix(k);
 
         double best_score = 0;
+        double best_margin = 0;
         unique_ptr<knn_classifier> best_classifier;
 
+        metric_t best_metric = nullptr;
+        kernel_t best_kernel = nullptr;
+        size_t best_neighbor = 0;
+
+        // Optimize hyperparameters
         for (const auto &metric : metrics) {
-            // Fill distance matrix
-            for (unsigned i = 0; i < n; ++i) {
-                distance[i][i] = 0;
-                for (unsigned j = i + 1; j < n; ++j) {
-                    distance[i][j] = distance[j][i] = metric(samples[i], samples[j]);
-                }
-            }
-            // Optimize hyperparameters
             for (const auto &kernel : kernels) {
                 for (const auto &neighbor : neighbors) {
+                    if (neighbor > n) continue;
+
                     // Clear confusion matrix
                     for (auto &confusion_matrix_row : confusion_matrix) {
                         confusion_matrix_row.assign(k, 0);
@@ -238,16 +246,32 @@ public:
                     double score = score::f1_micro(confusion_matrix);
                     if (score > best_score) {
                         best_score = score;
+                        best_metric = metric;
+                        best_kernel = kernel;
+                        best_neighbor = neighbor;
                         best_classifier = move(classifier);
                     }
                 }
             }
         }
-        return best_classifier;
+
+        // Prototype selection
+        vector<object> best_samples;
+        for (unsigned i = 0; i < n; ++i) {
+            if (best_classifier->get_margin(samples[i], i) > 0) {
+                best_samples.push_back(samples[i]);
+            }
+        }
+
+        if (best_neighbor >= best_samples.size()) {
+            best_neighbor = best_samples.size() - 1;
+        }
+
+        return knn_classifier(best_samples, best_metric, best_kernel, best_neighbor);
     }
 
-    knn_classifier(const vector<object> &samples, metric_t metric, kernel_t kernel, size_t neighbor) :
-            samples(samples), metric(move(metric)), kernel(move(kernel)), neighbor(neighbor) {}
+    knn_classifier(vector<object> samples, metric_t metric, kernel_t kernel, size_t neighbor) :
+            samples(move(samples)), metric(move(metric)), kernel(move(kernel)), neighbor(neighbor) {}
 
 
     class_t get_class(const object &object) {
@@ -260,7 +284,7 @@ public:
         stringstream result;
         vector<pair<double, size_t>> neighbor_data;
         for (size_t i = 0; i < n; ++i) {
-            neighbor_data.emplace_back(metric(object, samples[i]), i);
+            neighbor_data.emplace_back(metric(object, samples[i]), samples[i].get_index());
         }
         sort(neighbor_data.begin(), neighbor_data.end(),
              [](const pair<double, size_t> &a, const pair<double, size_t> &b) {
@@ -277,26 +301,32 @@ public:
     }
 
     static void initialize() {
-        auto int_generator = [n = 1]() mutable { return static_cast<unsigned>(n++); };
-        generate(neighbors.begin(), neighbors.end(), int_generator);
-
-        auto random_generator = mt19937(random_device()());
         shuffle(metrics.begin(), metrics.end(), random_generator);
         shuffle(kernels.begin(), kernels.end(), random_generator);
-        shuffle(neighbors.begin(), neighbors.end(), random_generator);
     }
 
 private:
     static vector<metric_t> metrics;
     static vector<kernel_t> kernels;
-    static array<unsigned, 3> neighbors;
 
-    const vector<object> &samples;
+    const vector<object> samples;
     const metric_t metric;
     const kernel_t kernel;
     const size_t neighbor;
 
     class_t get_class(const object &object, size_t leave_id) {
+        vector<double> weights = get_weights(object, leave_id);
+        auto max_score = max_element(weights.begin(), weights.end());
+        return static_cast<class_t>(distance(weights.begin(), max_score));
+    }
+
+    double get_margin(const object &object, size_t leave_id) {
+        vector<double> weights = get_weights(object, leave_id);
+        nth_element(weights.begin(), weights.begin() + 1, weights.end(), greater<>());
+        return weights[0] - weights[1];
+    }
+
+    vector<double> get_weights(const object &object, size_t leave_id) {
         const size_t n = samples.size();
 
         vector<pair<double, class_t>> neighbor_data;
@@ -312,16 +342,13 @@ private:
                  return a.first < b.first;
              });
 
-        vector<double> class_score;
-
+        vector<double> weights;
         for (unsigned i = 0; i < neighbor; ++i) {
             class_t class_id = neighbor_data[i].second;
-            while (class_score.size() <= class_id) class_score.emplace_back(0.0f);
-            class_score[class_id] += kernel(neighbor_data[i].first / neighbor_data[neighbor].first);
+            while (weights.size() <= class_id) weights.emplace_back(0.0f);
+            weights[class_id] += kernel(neighbor_data[i].first / neighbor_data[neighbor].first);
         }
-
-        auto max_score = max_element(class_score.begin(), class_score.end());
-        return static_cast<class_t>(distance(class_score.begin(), max_score));
+        return weights;
     }
 };
 
@@ -335,6 +362,7 @@ vector<metric_t> knn_classifier::metrics = { // NOLINT(cert-err58-cpp)
         metric::lance_willams,
         metric::cosine_similarity
 };
+
 vector<kernel_t> knn_classifier::kernels = { // NOLINT(cert-err58-cpp)
         kernel::uniform,
         kernel::triangular,
@@ -347,7 +375,6 @@ vector<kernel_t> knn_classifier::kernels = { // NOLINT(cert-err58-cpp)
         kernel::logistic,
         kernel::sigmoid
 };
-array<unsigned, 3> knn_classifier::neighbors = {};
 
 void solve() {
     /**
@@ -363,6 +390,7 @@ void solve() {
 
     vector<object> samples;
 
+    // Read training samples
     for (int object_id = 0; object_id < n; ++object_id) {
         vector<feature_t> features(m);
         for (int feature_id = 0; feature_id < m; ++feature_id) {
@@ -372,7 +400,7 @@ void solve() {
         }
         class_t class_id;
         cin >> class_id;
-        samples.emplace_back(features, class_id - 1);
+        samples.emplace_back(object_id, features, class_id - 1);
     }
 
     /**
@@ -383,6 +411,7 @@ void solve() {
 
     vector<object> tests;
 
+    // Read tests
     for (int object_id = 0; object_id < q; ++object_id) {
         vector<feature_t> features(m);
         for (int feature_id = 0; feature_id < m; ++feature_id) {
@@ -390,9 +419,10 @@ void solve() {
             max_features[feature_id] = max(max_features[feature_id], features[feature_id]);
             min_features[feature_id] = min(min_features[feature_id], features[feature_id]);
         }
-        tests.emplace_back(features, 0);
+        tests.emplace_back(object_id, features, 0);
     }
 
+    // Normalize features (minimax)
     for (object &sample : samples) {
         for (int feature_id = 0; feature_id < m; ++feature_id) {
             sample[feature_id] -= min_features[feature_id];
@@ -410,7 +440,7 @@ void solve() {
     knn_classifier::initialize();
     auto classifier = knn_classifier::make_classifier(k, samples);
     for (const object &test : tests) {
-        cout << classifier->info(test) << endl;
+        cout << classifier.info(test) << endl;
     }
 }
 
