@@ -333,7 +333,7 @@ public:
 
         vector<metric_t> metrics(metric::all);
         vector<kernel_t> kernels(kernel::all);
-        vector<size_t> neighbors = {1, 3, 5, 7};
+        vector<size_t> neighbors = {3, 5, 7};
 
         auto random_generator = mt19937(random_device()());
         shuffle(metrics.begin(), metrics.end(), random_generator);
@@ -369,7 +369,7 @@ public:
                     // Check score
                     double score = score::f1_micro(confusion_matrix);
                     if (score > best_score) {
-                        // cerr << "New score: " << score << endl;
+                        cerr << "New score: " << score << endl;
                         best_score = score;
                         best_metric = metric;
                         best_kernel = kernel;
@@ -486,11 +486,11 @@ void solve() {
 
     vector<object> train_set;
 
-    // Read training samples
+    // Read training set
     for (int object_id = 0; object_id < n; ++object_id) {
         vector<feature_t> features(m);
-        for (int feature_id = 0; feature_id < m; ++feature_id) {
-            cin >> features[feature_id];
+        for (feature_t &feature : features) {
+            cin >> feature;
         }
         class_t class_id;
         cin >> class_id;
@@ -508,17 +508,18 @@ void solve() {
     // Read tests
     for (int object_id = 0; object_id < q; ++object_id) {
         vector<feature_t> features(m);
-        for (int feature_id = 0; feature_id < m; ++feature_id) {
-            cin >> features[feature_id];
+        for (feature_t &feature : features) {
+            cin >> feature;
         }
         test_set.emplace_back(object_id, features, 0);
     }
 
+    // Apply Z-mean normalization
     normalization::z_mean(m, train_set, test_set);
 
     auto classifier = knn_classifier::make_classifier(m, k, train_set);
-    for (const object &test : test_set) {
-        cout << classifier.info(test) << endl;
+    for (const object &object : test_set) {
+        cout << classifier.info(object) << endl;
     }
 }
 
@@ -529,16 +530,25 @@ int main() {
 #ifdef DEBUG
     ifstream input("input.txt");
     ofstream output("output.txt");
+    streambuf *cin_buffer(cin.rdbuf());
+    streambuf *cout_buffer(cout.rdbuf());
     cin.rdbuf(input.rdbuf());
     cout.rdbuf(output.rdbuf());
+#else
+    streambuf *cerr_buffer(cerr.rdbuf());
+    cerr.rdbuf(nullptr);
 #endif
 
     solve();
     cout.flush();
 
 #ifdef DEBUG
+    cin.rdbuf(cin_buffer);
+    cout.rdbuf(cout_buffer);
     input.close();
     output.close();
+#else
+    cerr.rdbuf(cerr_buffer);
 #endif
     return 0;
 }
