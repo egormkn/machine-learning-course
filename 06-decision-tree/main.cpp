@@ -79,26 +79,20 @@ namespace gain {
         return score;
     }
 
-    double entropy(const vector<object> &objects, const function<bool(const object &)> &predicate_fn) {
+    double entropy(const vector<pair<unsigned, unsigned>> &distribution) {
         double result = 0.0;
-        vector<pair<unsigned, unsigned>> distribution;
-        unsigned true_objects = 0;
-        for (const object &object : objects) {
-            class_t obj_class = object.get_class();
-            if (obj_class >= distribution.size()) distribution.resize(obj_class + 1);
-            if (predicate_fn(object)) {
-                distribution[obj_class].second++;
-                true_objects++;
-            } else {
-                distribution[obj_class].first++;
-            }
+
+        int true_size = 0, false_size = 0;
+        for (auto &pair : distribution) {
+            false_size += pair.first;
+            true_size += pair.second;
         }
 
         auto h = [](double z) { return z < 1e-10 ? 0 : -z * log2(z); };
         auto P = [&distribution](class_t c) { return distribution[c].first + distribution[c].second; };
         auto p = [&distribution](class_t c) { return distribution[c].second; };
-        double p_all = true_objects;
-        double l = objects.size();
+        double p_all = true_size;
+        double l = true_size + false_size;
         const double epsilon = 1e-10;
 
         for (class_t c = 0; c < distribution.size(); c++) {
@@ -188,6 +182,8 @@ private:
     static constexpr auto max_level = 10;
     static constexpr auto epsilon = 1e-15;
 
+    static constexpr predicate_t null_predicate = make_pair(0, numeric_limits<double>::min()); // NOLINT(cert-err58-cpp)
+
     const shared_ptr<decision_tree> left, right;
     const size_t total_size;
     const class_t class_id;
@@ -215,6 +211,17 @@ private:
         };
     }
 
+    static double get_entropy(const vector<unsigned> &distribution, size_t objects_size) {
+        double result = 0.0;
+        for (class_t c = 0; c < distribution.size(); ++c) {
+            if (distribution[c] > 0) {
+                double z = (double) distribution[c] / objects_size;
+                result += -z * log2(z);
+            }
+        }
+        return result;
+    }
+
     static vector<unsigned> class_distribution(const vector<object> &objects, size_t classes_size) {
         vector<unsigned> distribution(classes_size);
         for (const auto &object : objects) {
@@ -224,16 +231,22 @@ private:
     }
 
     static class_t most_common_class(const vector<object> &objects, size_t classes_size) {
-        vector<unsigned> class_count = class_distribution(objects, classes_size);
-        auto max_iterator = max_element(class_count.begin(), class_count.end());
-        return static_cast<class_t>(distance(class_count.begin(), max_iterator));
+        vector<unsigned> distribution = class_distribution(objects, classes_size);
+        return most_common_class(distribution);
+    }
+
+    static class_t most_common_class(const vector<unsigned> &distribution) {
+        auto max_iterator = max_element(distribution.begin(), distribution.end());
+        return static_cast<class_t>(distance(distribution.begin(), max_iterator));
     }
 
     static decision_tree build_tree(const vector<object> &objects,
                                     const vector<vector<double>> &thresholds,
                                     int level, size_t classes_size) {
-        if (level == max_level) {
-            return decision_tree(most_common_class(objects, classes_size));
+        auto distribution = class_distribution(objects, classes_size);
+
+        if (level == max_level || get_entropy(distribution, objects.size()) < epsilon) {
+            return decision_tree(most_common_class(distribution));
         }
 
         // Check if all objects belong to one class
@@ -246,8 +259,12 @@ private:
         }
 
         // Select predicate
-        predicate_t predicate = select_predicate(objects, thresholds);
+        predicate_t predicate = select_predicate_v2(objects, thresholds, distribution);
         auto predicate_fn = get_predicate_fn(predicate);
+
+        if (predicate == null_predicate) {
+            return decision_tree(most_common_class(distribution));
+        }
 
         // Split objects by predicate
         vector<object> left_objects, right_objects;
@@ -260,7 +277,7 @@ private:
         }
 
         if (left_objects.empty() || right_objects.empty()) {
-            return decision_tree(most_common_class(objects, classes_size));
+            return decision_tree(most_common_class(distribution));
         }
 
         // Split thresholds
@@ -279,15 +296,51 @@ private:
         return decision_tree(left, right, predicate);
     }
 
-    static predicate_t select_predicate(const vector<object> &objects, const vector<vector<double>> &thresholds) {
-        double best_gain = numeric_limits<double>::min();
-        predicate_t best_predicate;
+    /*static predicate_t select_predicate(const vector<object> &objects, const vector<vector<double>> &thresholds) {
+        double best_gain = 0.0;
+        predicate_t best_predicate = null_predicate;
 
         for (unsigned feature_id = 0; feature_id < thresholds.size(); ++feature_id) {
             for (double threshold : thresholds[feature_id]) {
                 predicate_t predicate(feature_id, threshold);
                 auto predicate_fn = get_predicate_fn(predicate);
                 double gain = gain::entropy(objects, predicate_fn);
+                if (gain > best_gain) {
+                    best_gain = gain;
+                    best_predicate = predicate;
+                }
+            }
+        }
+        return best_predicate;
+    }*/
+
+    static predicate_t select_predicate_v2(const vector<object> &objects, const vector<vector<double>> &thresholds,
+                                           const vector<unsigned> &distribution) {
+        double best_gain = 0.0;
+        predicate_t best_predicate = null_predicate;
+
+        for (unsigned feature_id = 0; feature_id < thresholds.size(); ++feature_id) {
+            vector<object> sorted_objects = objects;
+            sort(sorted_objects.begin(), sorted_objects.end(), [feature_id](const object &a, const object &b) {
+                return a[feature_id] < b[feature_id];
+            });
+            int obj_index = 0;
+            vector<pair<unsigned, unsigned>> pred_distribution(distribution.size());
+            transform(distribution.begin(), distribution.end(), pred_distribution.begin(), [](unsigned value) {
+                return make_pair(value, 0);
+            });
+            for (double threshold : thresholds[feature_id]) {
+                predicate_t predicate(feature_id, threshold);
+                auto predicate_fn = get_predicate_fn(predicate);
+
+                while (obj_index < sorted_objects.size() && sorted_objects[obj_index][feature_id] < threshold) {
+                    const object &object = sorted_objects[obj_index];
+                    obj_index++;
+                    auto &pair = pred_distribution[object.get_class()];
+                    pair.second++;
+                    pair.first--;
+                }
+                double gain = gain::entropy(pred_distribution);
                 if (gain > best_gain) {
                     best_gain = gain;
                     best_predicate = predicate;
