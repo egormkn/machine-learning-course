@@ -31,6 +31,10 @@ public:
     feature_t operator[](size_t index) const { return features[index]; }
 
     class_t get_class() const { return class_id; }
+
+    vector<feature_t>::const_iterator begin() const { return features.begin(); }
+
+    vector<feature_t>::const_iterator end() const { return features.end(); }
 };
 
 typedef function<double(const object &, const object &)> metric_t;
@@ -38,6 +42,16 @@ typedef function<double(const object &, const object &)> metric_t;
 namespace metric {
 
     const double epsilon = 1e-15;
+
+    // sum [a_i == b_i]
+    double hamming(const object &a, const object &b) {
+        const size_t m = min(a.size(), b.size());
+        double result = 0;
+        for (size_t i = 0; i < m; ++i) {
+            result += fabs(a[i] - b[i]) < epsilon ? 1 : 0;
+        }
+        return result;
+    }
 
     // sqrt(sum (a_i - b_i)^2)
     double euclidean(const object &a, const object &b) {
@@ -47,12 +61,6 @@ namespace metric {
             result += pow(a[i] - b[i], 2.0f);
         }
         return sqrt(result);
-    }
-
-    // sqrt(sum (a_i - b_i)^2 / m)
-    double normalized_euclidean(const object &a, const object &b) {
-        const size_t m = min(a.size(), b.size());
-        return euclidean(a, b) / sqrt(m);
     }
 
     // max |a_i - b_i|
@@ -75,12 +83,12 @@ namespace metric {
         return result;
     }
 
-    // sum [a_i == b_i]
-    double hamming(const object &a, const object &b) {
+    // sum (ln (1 + |a_i - b_i|))
+    double lorentzian(const object &a, const object &b) {
         const size_t m = min(a.size(), b.size());
         double result = 0;
         for (size_t i = 0; i < m; ++i) {
-            result += fabs(a[i] - b[i]) < epsilon ? 1 : 0;
+            result += log(1 + fabs(a[i] - b[i]));
         }
         return result;
     }
@@ -96,27 +104,26 @@ namespace metric {
         return result;
     }
 
-    // 1/2 * sum (a_i - b_i)^2 / (a_i + b_i)^2
-    double chi_square(const object &a, const object &b) {
-        const size_t m = min(a.size(), b.size());
-        double result = 0;
-        for (size_t i = 0; i < m; ++i) {
-            double denominator = pow(a[i] + b[i], 2.0f);
-            result += denominator < epsilon ? 0 : pow(a[i] - b[i], 2.0f) / denominator;
-        }
-        return result / 2.0f;
-    }
-
     // sum |a_i - b_i| / sum (a_i + b_i)
-    double lance_willams(const object &a, const object &b) {
+    double sorensen(const object &a, const object &b) {
         const size_t m = min(a.size(), b.size());
         double numerator = 0, denominator = 0;
         for (size_t i = 0; i < m; ++i) {
             numerator += fabs(a[i] - b[i]);
             denominator += a[i] + b[i];
         }
-        if (fabs(denominator) < epsilon) return INFINITY;
-        return numerator / denominator;
+        return denominator < epsilon ? 0.0 : numerator / denominator;
+    }
+
+    // 2 * sum ((a_i - b_i)^2 / (a_i + b_i)^2)
+    double divergence(const object &a, const object &b) {
+        const size_t m = min(a.size(), b.size());
+        double result = 0;
+        for (size_t i = 0; i < m; ++i) {
+            double denominator = pow(a[i] + b[i], 2.0f);
+            result += denominator < epsilon ? 0 : pow(a[i] - b[i], 2.0f) / denominator;
+        }
+        return result * 2.0f;
     }
 
     // arccos(sum (a_i * b_i) / (sqrt(sum a_i^2) * sqrt(sum b_i^2)))
@@ -129,18 +136,18 @@ namespace metric {
             sum_b += pow(b[i], 2.0f);
         }
         double denominator = sqrt(sum_a) * sqrt(sum_b);
-        return denominator < epsilon ? 0.0 : acos(numerator / denominator);
+        return denominator < epsilon ? 1.0 : 1 - (numerator / denominator);
     }
 
     const vector<metric_t> all = { // NOLINT(cert-err58-cpp)
             metric::euclidean,
-            metric::normalized_euclidean,
             metric::chebyshev,
             metric::manhattan,
             metric::hamming,
+            // metric::lorentzian,
             metric::canberra,
-            /*metric::chi_square,
-            metric::lance_willams,*/
+            metric::sorensen,
+            // metric::divergence,
             metric::cosine_similarity
     };
 }
@@ -326,14 +333,15 @@ namespace score {
 
 class knn_classifier {
 public:
-    static knn_classifier make_classifier(size_t features_size, size_t class_size, const vector<object> &samples) {
+    static unique_ptr<knn_classifier>
+    make_classifier(size_t features_size, size_t class_size, const vector<object> &samples) {
         const size_t m = features_size;
         const size_t k = class_size;
         const size_t n = samples.size();
 
         vector<metric_t> metrics(metric::all);
         vector<kernel_t> kernels(kernel::all);
-        vector<size_t> neighbors = {3, 5, 7};
+        vector<size_t> neighbors = {3, 5, 7, 9, 11};
 
         auto random_generator = mt19937(random_device()());
         shuffle(metrics.begin(), metrics.end(), random_generator);
@@ -342,18 +350,14 @@ public:
 
         vector<vector<unsigned>> confusion_matrix(k);
 
-        unique_ptr<knn_classifier> best_classifier;
         double best_score = numeric_limits<double>::min();
-        metric_t best_metric = nullptr;
-        kernel_t best_kernel = nullptr;
-        size_t best_neighbor = 0;
-        vector<object> best_samples;
+        unique_ptr<knn_classifier> best_classifier;
 
         // Optimize hyperparameters
         for (const auto &metric : metrics) {
             for (const auto &kernel : kernels) {
                 for (const auto &neighbor : neighbors) {
-                    if (neighbor > n) continue;
+                    if (neighbor >= n) continue;
 
                     // Clear confusion matrix
                     for (auto &confusion_matrix_row : confusion_matrix) {
@@ -369,41 +373,16 @@ public:
                     // Check score
                     double score = score::f1_micro(confusion_matrix);
                     if (score > best_score) {
-                        cerr << "New score: " << score << endl;
+                        // cerr << "New score: " << score << endl;
                         best_score = score;
-                        best_metric = metric;
-                        best_kernel = kernel;
-                        best_neighbor = neighbor;
                         best_classifier = move(classifier);
                     }
                 }
             }
         }
 
-        // Prototype selection
-
-        /*
-        cerr << "Samples size: " << samples.size() << endl;
-
-        for (unsigned i = 0; i < n; ++i) {
-            if (best_classifier->get_margin(samples[i], i) > 0) {
-                best_samples.push_back(samples[i]);
-            }
-        }
-
-        if (best_neighbor >= best_samples.size()) {
-            best_neighbor = best_samples.size() - 1;
-        }
-
-        cerr << "Reduced samples size: " << best_samples.size() << endl;
-        */
-
-        return knn_classifier(samples, best_metric, best_kernel, best_neighbor);
+        return best_classifier;
     }
-
-    knn_classifier(vector<object> samples, metric_t metric, kernel_t kernel, size_t neighbor) :
-            samples(move(samples)), metric(move(metric)), kernel(move(kernel)), neighbor(neighbor) {}
-
 
     class_t get_class(const object &object) {
         return get_class(object, samples.size());
@@ -413,23 +392,24 @@ public:
         const size_t n = samples.size();
 
         stringstream result;
+        result << fixed << setprecision(8);
         vector<pair<double, size_t>> neighbor_data;
         for (size_t i = 0; i < n; ++i) {
             neighbor_data.emplace_back(metric(object, samples[i]), samples[i].get_index());
         }
-        sort(neighbor_data.begin(), neighbor_data.end(),
-             [](const pair<double, size_t> &a, const pair<double, size_t> &b) {
-                 return a.first < b.first;
-             });
+        sort(neighbor_data.begin(), neighbor_data.end());
 
         result << neighbor << " ";
         for (size_t i = 0; i < neighbor; ++i) {
             result << neighbor_data[i].second + 1 << " ";
-            result << fixed << setprecision(8) << kernel(neighbor_data[i].first / neighbor_data[neighbor].first)
+            result << kernel(neighbor_data[i].first / neighbor_data[neighbor].first)
                    << " ";
         }
         return result.str();
     }
+
+    knn_classifier(vector<object> samples, metric_t metric, kernel_t kernel, size_t neighbor) :
+            samples(move(samples)), metric(move(metric)), kernel(move(kernel)), neighbor(neighbor) {}
 
 private:
     const vector<object> samples;
@@ -460,10 +440,7 @@ private:
             neighbor_data.emplace_back(distance, class_id);
         }
 
-        sort(neighbor_data.begin(), neighbor_data.end(),
-             [](const pair<double, class_t> &a, const pair<double, class_t> &b) {
-                 return a.first < b.first;
-             });
+        sort(neighbor_data.begin(), neighbor_data.end());
 
         vector<double> weights;
         for (unsigned i = 0; i < neighbor; ++i) {
@@ -505,7 +482,7 @@ void solve() {
 
     vector<object> test_set;
 
-    // Read tests
+    // Read test set
     for (int object_id = 0; object_id < q; ++object_id) {
         vector<feature_t> features(m);
         for (feature_t &feature : features) {
@@ -517,9 +494,10 @@ void solve() {
     // Apply Z-mean normalization
     normalization::z_mean(m, train_set, test_set);
 
+    // Run classifier
     auto classifier = knn_classifier::make_classifier(m, k, train_set);
     for (const object &object : test_set) {
-        cout << classifier.info(object) << endl;
+        cout << classifier->info(object) << endl;
     }
 }
 
