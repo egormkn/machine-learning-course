@@ -326,15 +326,11 @@ public:
                 polynomial(1, 2),
                 polynomial(1, 3),
                 polynomial(1, 4),
-                rbf(0.125),
-                rbf(0.25),
-                rbf(0.5),
                 rbf(1),
                 rbf(2),
-                rbf(2.5)
+                rbf(3)
         };
-        vector<double> c_values = {0.1, 0.5, 1, 2, 3, 4, 5, 10, 20, 30, 50, 100, 200, 300, 500, 1000, 5000, 10000,
-                                   100000};
+        vector<double> c_values = {0.01, 0.1, 1, 10, 100, 1000, 10000, 100000};
 
         shuffle(kernels.begin(), kernels.end(), random_generator);
         shuffle(c_values.begin(), c_values.end(), random_generator);
@@ -344,8 +340,19 @@ public:
         double best_score = -numeric_limits<double>::max();
         unique_ptr<svm> best_classifier;
 
-        // Select hyperparameters
+        vector<vector<double>> kernel_cache(objects_size, vector<double>(objects_size));
+
+        // Select kernel
         for (const kernel_ptr &kernel : kernels) {
+
+            // Fill kernel matrix
+            for (unsigned i = 0; i < objects_size; ++i) {
+                for (unsigned j = i; j < objects_size; ++j) {
+                    kernel_cache[i][j] = kernel_cache[j][i] = kernel->apply(train_set[i], train_set[j]);
+                }
+            }
+
+            // Select c
             for (double c : c_values) {
 
                 // Clear confusion matrix
@@ -354,7 +361,7 @@ public:
                 }
 
                 // Find lambdas
-                svm::solver solver(train_set, features_size, kernel, c);
+                smo_solver solver(train_set, features_size, kernel, kernel_cache, c);
                 const vector<double> &lambdas = solver.get_lambdas();
                 const double &b = solver.get_b();
 
@@ -362,14 +369,14 @@ public:
                 auto classifier = make_unique<svm>(train_set, features_size, kernel, lambdas, b);
                 for (unsigned object_id = 0; object_id < objects_size; ++object_id) {
                     class_t real_class = train_set[object_id].get_class();
-                    class_t predicted_class = classifier->get_class(train_set[object_id], object_id);
+                    class_t predicted_class = classifier->get_class(train_set[object_id], object_id, kernel_cache);
                     confusion_matrix[(real_class + 1) / 2][(predicted_class + 1) / 2]++;
                 }
 
                 // Check score
                 double score = score::f1_micro(confusion_matrix);
                 if (score > best_score) {
-                    cerr << "New score: " << score << endl;
+                    // cerr << "New score: " << score << endl;
                     best_score = score;
                     best_classifier = move(classifier);
                 }
@@ -380,7 +387,15 @@ public:
     }
 
     class_t get_class(const object &x) const {
-        return get_class(x, objects.size());
+        const auto &objects_size = objects.size();
+
+        double result = -b;
+        for (unsigned object_id = 0; object_id < objects_size; ++object_id) {
+            if (fabs(lambdas[object_id]) < epsilon) continue;
+            const object &object = objects[object_id];
+            result += lambdas[object_id] * object.get_class() * kernel->apply(object, x);
+        }
+        return result > 0 ? 1 : -1;
     }
 
     kernel_ptr get_kernel() const {
@@ -408,175 +423,230 @@ private:
     const vector<double> lambdas;
     const double b;
 
-    class_t get_class(const object &x, size_t leave_id) const {
+    class_t get_class(const object &x, size_t x_id) const {
         const auto &objects_size = objects.size();
 
         double result = -b;
         for (unsigned object_id = 0; object_id < objects_size; ++object_id) {
-            if (object_id == leave_id) continue;
+            if (object_id == x_id) continue;
             const object &object = objects[object_id];
-            result += lambdas[object_id] * object.get_class() * kernel->apply(object, x);
+            result += lambdas[object_id] * object.get_class() * kernel->apply(x, object);
         }
         return result > 0 ? 1 : -1;
     }
 
-    class solver {
-    private:
-        const vector<object> objects;
+    class_t get_class(const object &x, size_t x_id, const vector<vector<double>> &kernel_cache) const {
+        const auto &objects_size = objects.size();
+
+        double result = -b;
+        for (unsigned object_id = 0; object_id < objects_size; ++object_id) {
+            if (object_id == x_id) continue;
+            const object &object = objects[object_id];
+            result += lambdas[object_id] * object.get_class() * kernel_cache[x_id][object_id];
+        }
+        return result > 0 ? 1 : -1;
+    }
+
+    // Sequential Minimal Optimization
+    class smo_solver {
+    public:
+        smo_solver(const vector<object> &objects, size_t features_size, const kernel_ptr &kernel,
+                   const vector<vector<double>> &kernel_cache, double c)
+                : objects(objects), features_size(features_size), kernel(kernel), kernel_cache(kernel_cache), c(c) {
+            lambdas.resize(objects.size(), 0.0);
+            solve();
+        }
+
+        vector<double> get_lambdas() {
+            return lambdas;
+        }
+
+        double get_b() {
+            return b;
+        }
+
+    protected:
+        static constexpr double tolerance = 1e-3;
+        static constexpr double eps = 1e-3;
+
+        const vector<object> &objects;
         const size_t features_size;
-        const kernel_ptr kernel;
+        const kernel_ptr &kernel;
+        const vector<vector<double>> &kernel_cache;
         const double c;
 
         vector<double> lambdas;
         double b = 0.0;
 
-        void solve_smo() {
-            const auto &objects_size = objects.size();
+        vector<double> error_cache;
+        set<unsigned> non_bound;
 
-            vector<double> lambdas(objects_size, 0.0);
-            double b = 0.0;
+        double f(const object &x) {
+            double result = -b;
+            for (unsigned object_id = 0; object_id < objects.size(); ++object_id) {
+                const object &object = objects[object_id];
+                result += lambdas[object_id] * object.get_class() * kernel->apply(x, object);
+            }
+            return result;
+        };
 
-            set<unsigned> non_bound;
-            vector<double> error_cache(objects_size, -b);
-            for (unsigned i = 0; i < objects_size; ++i) {
-                error_cache[i] -= objects[i].get_class();
-                // Lambdas = 0
+        double f(unsigned i) {
+            double result = -b;
+            for (unsigned object_id = 0; object_id < objects.size(); ++object_id) {
+                result += lambdas[object_id] * objects[object_id].get_class() * kernel_cache[i][object_id];
+            }
+            return result;
+        };
+
+        inline bool between_bounds(double alpha) {
+            return fabs(alpha) > epsilon && fabs(alpha) < c - epsilon;
+        }
+
+        inline bool on_bounds(double alpha) {
+            return fabs(alpha) < epsilon || fabs(alpha - c) < epsilon;
+        }
+
+        bool take_step(unsigned i1, unsigned i2, double E2) {
+            if (i1 == i2) return false;
+
+            const object &x1 = objects[i1], &x2 = objects[i2];
+            class_t y1 = x1.get_class(), y2 = x2.get_class();
+            double alpha1 = lambdas[i1], alpha2 = lambdas[i2];
+
+            double E1 = between_bounds(alpha1) ? error_cache[i1] : (f(i1) - y1); // FIXME: Check later
+            double s = y1 * y2;
+
+            double L = y1 == y2 ? max(0.0, alpha1 + alpha2 - c) : max(0.0, alpha2 - alpha1);
+            double H = y1 == y2 ? min(c, alpha1 + alpha2) : min(c, c + alpha2 - alpha1);
+
+            if (fabs(L - H) < epsilon) return false;
+
+            double k11 = kernel_cache[i1][i1];
+            double k12 = kernel_cache[i1][i2];
+            double k22 = kernel_cache[i2][i2];
+
+            double eta = k11 + k22 - 2 * k12;
+
+            double a1, a2;
+
+            if (eta > 0) {
+                a2 = alpha2 + y2 * (E1 - E2) / eta;
+                if (a2 < L) {
+                    a2 = L;
+                } else if (a2 > H) {
+                    a2 = H;
+                }
+            } else {
+                // FIXME: check or replace
+                double f1 = y1 * (E1 + b) - alpha1 * k11 - s * alpha2 * k12;
+                double f2 = y2 * (E2 + b) - s * alpha1 * k12 - alpha2 * k22;
+                double L1 = alpha1 + s * (alpha2 - L);
+                double H1 = alpha1 + s * (alpha2 - H);
+                double objL = L1 * f1 + L * f2 + 0.5 * L1 * L1 * k11 + 0.5 * L * L * k22 + s * L * L1 * k12;
+                double objH = H1 * f1 + H * f2 + 0.5 * H1 * H1 * k11 + 0.5 * H * H * k22 + s * H * H1 * k12;
+                if (objL < objH - eps) {
+                    a2 = L;
+                } else if (objL > objH + eps) {
+                    a2 = H;
+                } else {
+                    a2 = alpha2;
+                }
             }
 
-            const auto &f_old = [this, &lambdas, &b](const object &x) {
-                double result = b;
-                for (unsigned object_id = 0; object_id < objects.size(); ++object_id) {
-                    const object &object = objects[object_id];
-                    result += lambdas[object_id] * object.get_class() * kernel->apply(x, object);
-                }
-                return result;
-            };
+            if (fabs(a2 - alpha2) < eps * (a2 + alpha2 + eps)) return false;
 
-            const auto &take_step = [this, &lambdas, &error_cache, &non_bound, &b](unsigned i1, unsigned i2,
-                                                                                   double E2) {
-                if (i1 == i2) return false;
-                const auto &x2 = objects[i2];
-                const auto &y2 = x2.get_class();
-                double a2 = lambdas[i2];
-                const auto &x1 = objects[i1];
-                const auto &y1 = x1.get_class();
-                double a1 = lambdas[i1];
-                double E1 = error_cache[i1];
-                double s = y1 * y2;
+            a1 = alpha1 + s * (alpha2 - a2);
 
-                double a1new, a2new;
+            // FIXME: Below
+            /*if (a1 < 0) {
+                a2 += s * a1;
+                a1 = 0;
+            } else if (a1 > c) {
+                a2 += s * (a1 - c);
+                a1 = c;
+            }*/
+            // FIXME: Above
 
-                double L = y1 == y2 ? max(0.0, a1 + a2 - c) : max(0.0, a2 - a1);
-                double H = y1 == y2 ? min(c, a1 + a2) : min(c, c + a2 - a1);
 
-                if (L == H) return false;
+            double b1 = b + E1 + y1 * (a1 - alpha1) * k11 + y2 * (a2 - alpha2) * k12;
+            double b2 = b + E2 + y1 * (a1 - alpha1) * k12 + y2 * (a2 - alpha2) * k22;
 
-                double k11 = kernel->apply(x1, x1);
-                double k12 = kernel->apply(x1, x2);
-                double k22 = kernel->apply(x2, x2);
+            double b_new;
+            if (0 < a1 && a1 < c) {
+                b_new = b1;
+            } else if (0 < a2 && a2 < c) {
+                b_new = b2;
+            } else {
+                b_new = (b1 + b2) / 2.0;
+            }
 
-                double eta = k11 + k22 - 2 * k12;
-                if (eta > 0) {
-                    a2new = a2 + y2 * (E1 - E2) / eta;
-                    if (a2new < L) {
-                        a2new = L;
-                    } else if (a2new > H) {
-                        a2new = H;
+            double deltaB = b_new - b;
+            b = b_new;
+
+            double deltaA1 = a1 - alpha1;
+            double deltaA2 = a2 - alpha2;
+
+            // Update error cache
+            for (unsigned i : non_bound) {
+                error_cache[i] += deltaA1 * y1 * kernel_cache[i1][i] +
+                                  deltaA2 * y2 * kernel_cache[i2][i] - deltaB;
+            }
+            error_cache[i1] = 0.0; // FIXME: Check
+            error_cache[i2] = 0.0;
+
+            // Update set of multipliers on bounds
+            if (!on_bounds(a1)) {
+                non_bound.insert(i1);
+            } else {
+                non_bound.erase(i1);
+            }
+
+            if (!on_bounds(a2)) {
+                non_bound.insert(i2);
+            } else {
+                non_bound.erase(i2);
+            }
+
+            // Store results in the array
+            lambdas[i1] = a1;
+            lambdas[i2] = a2;
+
+            return true;
+        }
+
+        bool examine_example(unsigned i2) {
+            const object &x2 = objects[i2];
+            class_t y2 = x2.get_class();
+            double alpha2 = lambdas[i2];
+
+            double E2 = between_bounds(alpha2) ? error_cache[i2] : (f(i2) - y2); // FIXME: Check later
+            double r2 = E2 * y2;
+            if ((r2 < -tolerance && alpha2 < c - epsilon) || (r2 > tolerance && alpha2 > epsilon)) {
+                if (non_bound.size() > 1) {
+                    unsigned i1 = 0;
+                    for (unsigned i : non_bound) {
+                        if (fabs(E2 - error_cache[i]) > fabs(E2 - error_cache[i1])) i1 = i;
                     }
-                } else {
-                    double f1 = y1 * (E1 + b) - a1 * k11 - s * a2 * k12;
-                    double f2 = y2 * (E2 + b) - s * a1 * k12 - a2 * k22;
-                    double L1 = a1 + s * (a2 - L);
-                    double H1 = a1 + s * (a2 - H);
-                    double objL = L1 * f1 + L * f2 + 0.5 * L1 * L1 * k11 + 0.5 * L * L * k22 + s * L * L1 * k12;
-                    double objH = H1 * f1 + H * f2 + 0.5 * H1 * H1 * k11 + 0.5 * H * H * k22 + s * H * H1 * k12;
-                    if (objL < objH - epsilon) {
-                        a2new = L;
-                    } else if (objL > objH + epsilon) {
-                        a2new = H;
-                    } else {
-                        a2new = a2;
-                    }
+                    if (take_step(i1, i2, E2)) return true;
                 }
-
-                if (fabs(a2 - a2new) < epsilon * (a2 + a2new + epsilon)) return false;
-
-                a1new = a1 + s * (a2 - a2new);
-                double b1 = b + E1 + y1 * (a1new - a1) * k11 + y2 * (a2new - a2) * k12;
-                double b2 = b + E2 + y1 * (a1new - a1) * k12 + y2 * (a2new - a2) * k22;
-
-                double deltaB;
-                if (0 < a1new && a1new < c) {
-                    deltaB = b1 - b;
-                    b = b1;
-                } else if (0 < a2new && a2new < c) {
-                    deltaB = b2 - b;
-                    b = b2;
-                } else {
-                    deltaB = (b1 + b2) / 2.0 - b;
-                    b = (b1 + b2) / 2.0;
+                vector<unsigned> non_bound_ids(non_bound.begin(), non_bound.end());
+                shuffle(non_bound_ids.begin(), non_bound_ids.end(), random_generator);
+                for (unsigned i1 : non_bound_ids) {
+                    if (take_step(i1, i2, E2)) return true;
                 }
-
-                double deltaA1 = a1new - a1;
-                double deltaA2 = a2new - a2;
-
-                for (unsigned i = 0; i < objects.size(); ++i) {
-                    error_cache[i] += deltaA1 * y1 * kernel->apply(x1, objects[i]) +
-                                      deltaA2 * y2 * kernel->apply(x2, objects[i]) - deltaB;
+                unsigned random_start = random_generator() % objects.size();
+                for (unsigned i = random_start; i < random_start + objects.size(); ++i) {
+                    auto i1 = static_cast<unsigned>(i % objects.size());
+                    if (take_step(i1, i2, E2)) return true;
                 }
+            }
+            return false;
+        }
 
-                lambdas[i1] = a1new;
-                lambdas[i2] = a2new;
+        void solve() {
+            const auto &objects_size = objects.size();
 
-                if (a1new != 0 && a1new != c) {
-                    non_bound.insert(i1);
-                } else {
-                    non_bound.erase(i1);
-                }
-
-                if (a2new != 0 && a2new != c) {
-                    non_bound.insert(i2);
-                } else {
-                    non_bound.erase(i2);
-                }
-
-                return true;
-            };
-
-            const auto &examine_example = [this, &lambdas, &error_cache, &non_bound, &take_step](unsigned i2) {
-                const auto &x2 = objects[i2];
-                const auto &y2 = x2.get_class();
-                double a2 = lambdas[i2];
-                double E2 = error_cache[i2];
-                double r2 = E2 * y2;
-                if ((r2 < -epsilon && a2 < c) || (r2 > epsilon && a2 > 0)) {
-                    if (non_bound.size() > 1) {
-                        unsigned i1 = 0;
-                        if (E2 > 0) {
-                            for (unsigned i : non_bound) {
-                                if (error_cache[i] < error_cache[i1]) i1 = i;
-                            }
-                        } else {
-                            for (unsigned i : non_bound) {
-                                if (error_cache[i] > error_cache[i1]) i1 = i;
-                            }
-                        }
-                        if (take_step(i1, i2, E2)) return true;
-                    }
-                    vector<unsigned> i1s(non_bound.begin(), non_bound.end());
-                    shuffle(i1s.begin(), i1s.end(), random_generator);
-                    for (unsigned i1 : i1s) {
-                        if (take_step(i1, i2, E2)) return true;
-                    }
-                    i1s.resize(objects.size());
-                    iota(i1s.begin(), i1s.end(), 0);
-                    shuffle(i1s.begin(), i1s.end(), random_generator);
-                    for (unsigned i1 : i1s) {
-                        if (take_step(i1, i2, E2)) return true;
-                    }
-                }
-                return false;
-            };
+            error_cache.resize(objects_size, 0.0);
 
             int num_changed = 0;
             bool examine_all = true;
@@ -589,108 +659,14 @@ private:
                     examine_all = false;
                 } else {
                     for (unsigned i : non_bound) {
+                        // if (!on_bounds(lambdas[i]))
                         if (examine_example(i)) num_changed++;
                     }
-                    if (num_changed == 0) examine_all = true;
-                }
-            }
-
-            this->lambdas = lambdas;
-            this->b = b;
-        }
-
-        void solve_simplified_smo() {
-            const auto &objects_size = objects.size();
-            const auto &features_size = objects[0].size();
-
-            uniform_int_distribution<> random_range(1, static_cast<int>(objects_size - 1));
-
-            vector<double> lambdas(objects_size, 0.0);
-            double b = 0.0;
-
-            unsigned passes = 0;
-            while (passes < 100) {
-                unsigned num_changed_lambdas = 0;
-                for (unsigned i = 0; i < objects_size; ++i) {
-                    const object &x_i = objects[i];
-                    const class_t &y_i = objects[i].get_class();
-                    double &a_i = lambdas[i];
-                    const auto &f = [this, &lambdas, &b](const object &x) {
-                        double result = b;
-                        for (unsigned object_id = 0; object_id < objects.size(); ++object_id) {
-                            const object &object = objects[object_id];
-                            result += lambdas[object_id] * object.get_class() * kernel->apply(x, object);
-                        }
-                        return result;
-                    };
-
-                    double E_i = f(x_i) - y_i;
-
-                    if ((y_i * E_i < -epsilon && a_i < c) || (y_i * E_i > epsilon && a_i > 0)) {
-                        unsigned j = (i + random_range(random_generator)) % objects_size;
-                        const object &x_j = objects[j];
-                        const class_t &y_j = objects[j].get_class();
-                        double &a_j = lambdas[j];
-
-                        double E_j = f(x_j) - y_j;
-
-                        double a_i_old = a_i, a_j_old = a_j;
-
-                        double L = y_i == y_j ? max(0.0, a_i + a_j - c) : max(0.0, a_j - a_i);
-                        double H = y_i == y_j ? min(c, a_i + a_j) : min(c, c + a_j - a_i);
-
-                        if (fabs(L - H) < epsilon) continue;
-
-                        double eta = 2 * kernel->apply(x_i, x_j) - kernel->apply(x_i, x_i) - kernel->apply(x_j, x_j);
-
-                        if (eta >= 0) continue;
-
-                        a_j = a_j - y_j * (E_i - E_j) / eta;
-                        if (a_j > H) a_j = H;
-                        if (a_j < L) a_j = L;
-
-                        if (fabs(a_j - a_j_old) < 1e-5) continue;
-
-                        a_i = a_i + y_i * y_j * (a_j_old - a_j);
-
-                        double b1 = b - E_i - y_i * (a_i - a_i_old) * kernel->apply(x_i, x_i) -
-                                    y_j * (a_j - a_j_old) * kernel->apply(x_i, x_j);
-                        double b2 = b - E_j - y_i * (a_i - a_i_old) * kernel->apply(x_i, x_j) -
-                                    y_j * (a_j - a_j_old) * kernel->apply(x_j, x_j);
-
-                        if (0 < a_i && a_i < c) {
-                            b = b1;
-                        } else if (0 < a_j && a_j < c) {
-                            b = b2;
-                        } else {
-                            b = (b1 + b2) / 2.0;
-                        }
-
-                        num_changed_lambdas++;
+                    if (num_changed == 0) {
+                        examine_all = true;
                     }
                 }
-                passes = num_changed_lambdas == 0 ? passes + 1 : 0;
             }
-
-
-            this->lambdas = lambdas;
-            this->b = -b;
-        }
-
-    public:
-        solver(vector<object> objects, size_t features_size, kernel_ptr kernel, double c) : objects(move(objects)),
-                                                                                            features_size(
-                                                                                                    features_size),
-                                                                                            kernel(move(kernel)), c(c) {
-            solve_smo();
-        }
-
-        vector<double> get_lambdas() {
-            return lambdas;
-        }
-
-        double get_b() {
-            return b;
         }
     };
 };
