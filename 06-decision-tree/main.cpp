@@ -1,3 +1,4 @@
+#include <utility>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -115,7 +116,7 @@ namespace gain {
 class decision_tree {
 public:
 
-    static decision_tree make_tree(size_t features_size, size_t classes_size, const vector<object> &train_set) {
+    static decision_tree make_tree(const vector<object> &train_set, size_t features_size, size_t classes_size) {
 
         vector<vector<feature_value_t>> feature_values(features_size);
         for (size_t feature_id = 0; feature_id < features_size; ++feature_id) {
@@ -170,7 +171,8 @@ private:
     static constexpr auto max_level = 10;
     static constexpr auto epsilon = 1e-15;
 
-    static constexpr predicate_t null_predicate = make_pair(0, numeric_limits<double>::min()); // NOLINT(cert-err58-cpp)
+    static constexpr predicate_t null_predicate = make_pair(0,
+                                                            -numeric_limits<double>::max()); // NOLINT(cert-err58-cpp)
 
     const shared_ptr<decision_tree> left, right;
     const size_t total_size;
@@ -179,12 +181,12 @@ private:
 
     decision_tree(const decision_tree &left,
                   const decision_tree &right,
-                  const predicate_t &predicate) : // NOLINT(modernize-pass-by-value)
+                  predicate_t predicate) :
             left(make_shared<decision_tree>(left)),
             right(make_shared<decision_tree>(right)),
             total_size(left.size() + right.size() + 1),
             class_id(numeric_limits<class_t>::max()),
-            predicate(predicate) {}
+            predicate(move(predicate)) {}
 
     explicit decision_tree(class_t class_id) :
             left(nullptr),
@@ -213,7 +215,7 @@ private:
 
         predicate_t select_predicate(const vector<vector<feature_value_t>> &feature_values,
                                      const vector<unsigned> &distribution) {
-            double best_gain = numeric_limits<double>::min();
+            double best_gain = -numeric_limits<double>::max();
             predicate_t best_predicate = null_predicate;
 
             for (unsigned feature_id = 0; feature_id < feature_values.size(); ++feature_id) {
@@ -269,7 +271,7 @@ private:
             }
 
             cerr << "New predicate: A[" << best_predicate.first << "] < " << best_predicate.second << ", gain = "
-                 << best_gain << endl << endl;
+                    << best_gain << endl << endl;
 
             return best_predicate;
         }
@@ -294,7 +296,7 @@ private:
                 return a.get_class() != b.get_class();
             };
             if (adjacent_find(current_objects.begin(), current_objects.end(), not_equal_classes) ==
-                current_objects.end()) {
+                    current_objects.end()) {
                 class_t only_class = current_objects[0].get_class();
                 return decision_tree(only_class);
             }
@@ -351,14 +353,14 @@ void solve() {
      * k - number of classes
      * n - number of objects in training set
      */
-    size_t m, k, n;
-    cin >> m >> k >> n;
+    size_t features_size, classes_size, objects_size;
+    cin >> features_size >> classes_size >> objects_size;
 
     vector<object> train_set;
 
     // Read training set
-    for (unsigned object_id = 0; object_id < n; ++object_id) {
-        vector<feature_t> features(m);
+    for (unsigned object_id = 0; object_id < objects_size; ++object_id) {
+        vector<feature_t> features(features_size);
         for (feature_t &feature : features) {
             cin >> feature;
         }
@@ -367,7 +369,7 @@ void solve() {
         train_set.emplace_back(features, class_id - 1);
     }
 
-    auto tree = decision_tree::make_tree(m, k, train_set);
+    auto tree = decision_tree::make_tree(train_set, features_size, classes_size);
     cout << tree << endl;
 }
 
@@ -387,6 +389,7 @@ int main() {
     cerr.rdbuf(nullptr);
 #endif
 
+    cout << fixed;
     solve();
     cout.flush();
 
