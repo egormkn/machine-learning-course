@@ -8,10 +8,10 @@ void solve() {
     /**
      * m - number of variables in boolean function
      */
-    size_t m;
-    cin >> m;
+    size_t var_size;
+    cin >> var_size;
 
-    size_t two_power_m = 1u << m;
+    size_t two_power_m = 1u << var_size;
 
     // Build perfect DNF by the given truth table
     vector<unsigned> dnf;
@@ -22,8 +22,8 @@ void solve() {
 
     // If function is identically zero, print one layer and exit
     if (dnf.empty()) {
-        cout << 2 << ' ' << m << ' ' << 1 << endl;
-        for (unsigned i = 0; i < m; ++i) {
+        cout << 2 << ' ' << var_size << ' ' << 1 << endl;
+        for (unsigned i = 0; i < var_size; ++i) {
             cout << 0 << ' ';
         }
         cout << -0.5;
@@ -31,10 +31,10 @@ void solve() {
     }
 
     // Print conjunction layer
-    cout << 3 << ' ' << m << ' ' << dnf.size() << ' ' << 1 << endl;
+    cout << 3 << ' ' << var_size << ' ' << dnf.size() << ' ' << 1 << endl;
     for (unsigned conjunction : dnf) {
         unsigned bit_count = 0;
-        for (unsigned j = 0; j < m; ++j) {
+        for (unsigned j = 0; j < var_size; ++j) {
             cout << (conjunction & 1u ? 1 : -1) << ' ';
             bit_count += conjunction & 1u;
             conjunction >>= 1;
