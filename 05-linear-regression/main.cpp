@@ -7,11 +7,8 @@
 #include <sstream>
 #include <iomanip>
 #include <cassert>
-#include <set>
 
 using namespace std;
-
-auto random_generator = mt19937(random_device()()); // NOLINT
 
 typedef int feature_t;
 
@@ -42,7 +39,7 @@ template<typename T>
 class matrix {
 private:
     vector<vector<T>> data;
-    const size_t num_rows, num_cols;
+    size_t num_rows, num_cols;
     static constexpr double epsilon = 1e-8;
 
 public:
@@ -117,6 +114,70 @@ public:
         return result;
     }
 
+    matrix<T> operator!() {
+        assert(num_rows == num_cols);
+        matrix<T> result(num_rows, num_cols + num_rows);
+        for (unsigned i = 0; i < data.size(); ++i) {
+            for (unsigned j = 0; j < data[i].size(); ++j) {
+                result.data[i][j] = data[i][j];
+            }
+            result.data[i][num_cols + i] = 1.0;
+        }
+
+        // forward
+
+        for (int i = 0; i < num_rows; i++) {
+            int fromRow = i, fromColumn = fromRow;
+
+            double tmp = result[fromRow][fromColumn];
+            result[fromRow][fromColumn] = 1.0;
+
+            for (int j = fromColumn + 1; j < num_rows + num_cols; j++) {
+                result[fromRow][j] /= tmp;
+            }
+
+            for (int j = fromRow + 1; j < num_rows; j++) {
+                if (fabs(result[j][fromColumn]) < epsilon) {
+                    continue; // value is too small
+                }
+
+                tmp = result[j][fromColumn];
+                result[j][fromColumn] = 0.0;
+
+                for (int k = fromColumn + 1; k < num_rows + num_cols; k++) {
+                    result[j][k] -= result[fromRow][k] * tmp;
+                }
+            }
+        }
+
+        // back
+
+        for (int i = num_rows - 1; i >= 0; i--) {
+            int fromRow = i, fromColumn = fromRow;
+            for (int j = fromRow - 1; j >= 0; j--) {
+                if (fabs(result[j][fromColumn]) < epsilon) {
+                    continue; // value is too small
+                }
+
+                double tmp = result[j][fromColumn];
+                for (int k = num_rows + num_cols - 1; k > j; k--) {
+                    result[j][k] -= result[fromRow][k] * tmp;
+                }
+            }
+        }
+
+        for (unsigned i = 0; i < num_rows; ++i) {
+            for (unsigned j = 0; j < num_rows; ++j) {
+                result[i][j] = result[i][j + num_cols];
+            }
+            result[i].resize(num_rows);
+        }
+
+        result.num_cols -= num_rows;
+
+        return result;
+    }
+
     static matrix<T> column(const vector<T> &vector) {
         matrix<T> result(vector.size(), 1);
         for (unsigned i = 0; i < result.num_rows; ++i)
@@ -130,7 +191,7 @@ public:
         return result;
     }
 
-    set<unsigned> independent_rows() {
+    vector<unsigned> independent_rows() {
         vector<vector<double>> m = data;
         vector<bool> row_used(num_rows, false);
         for (unsigned i = 0; i < num_cols; ++i) {
@@ -148,9 +209,9 @@ public:
                             m[k][p] -= m[j][p] * m[k][i];
             }
         }
-        set<unsigned> independent;
+        vector<unsigned> independent;
         for (unsigned i = 0; i < num_rows; ++i) {
-            if (row_used[i]) independent.insert(i);
+            if (row_used[i]) independent.push_back(i);
         }
         return independent;
     }
@@ -162,9 +223,9 @@ public:
         for (int col = 0, row = 0; col < A.num_cols && row < A.num_rows; ++col) {
             int sel = row;
             for (int i = row; i < A.num_rows; ++i)
-                if (abs(A[i][col]) > abs(A[sel][col]))
+                if (fabs(A[i][col]) > fabs(A[sel][col]))
                     sel = i;
-            if (abs(A[sel][col]) < epsilon) continue;
+            if (fabs(A[sel][col]) < epsilon) continue;
             for (int i = col; i < A.num_cols; ++i)
                 swap(A[sel][i], A[row][i]);
             swap(b[sel][0], b[row][0]);
@@ -191,9 +252,8 @@ using matrix_t = matrix<double>;
 
 class linear_regression {
 public:
-    static unique_ptr<linear_regression> make_regression(const vector<object> &train_set) {
+    static linear_regression make_regression(size_t features_size, const vector<object> &train_set) {
         const auto &objects_size = train_set.size();
-        const auto &features_size = train_set[0].size();
 
         // F^t[features+1 × objects]
         matrix_t Ft(features_size + 1, objects_size);
@@ -211,7 +271,7 @@ public:
         }
 
         // Get linearly independent rows of F^t (that are also independent columns of F)
-        set<unsigned> independent = Ft.independent_rows();
+        vector<unsigned> independent = Ft.independent_rows();
 
         // Build reduced F^t matrix
         matrix_t Ft_fixed(independent.size(), objects_size);
@@ -226,6 +286,11 @@ public:
         // F^t * F [features+1 × features+1]
         matrix_t F_cov = Ft_fixed * F_fixed;
 
+        // Add ridge regularization
+        for (unsigned i = 0; i < min(F_cov.rows(), F_cov.cols()); ++i) {
+            F_cov[i][i] += 0.01;
+        }
+
         // F^t * y [features+1 × 1]
         matrix_t Fty = Ft_fixed * y;
 
@@ -238,7 +303,7 @@ public:
             coefficients[ind] = alpha[current_row++][0];
         }
 
-        return make_unique<linear_regression>(coefficients);
+        return linear_regression(coefficients);
     }
 
     string info() const {
@@ -278,8 +343,8 @@ void solve() {
         train_set.emplace_back(features, class_id);
     }
 
-    auto regression = linear_regression::make_regression(train_set);
-    cout << regression->info() << endl;
+    auto regression = linear_regression::make_regression(m, train_set);
+    cout << regression.info() << endl;
 }
 
 int main() {
