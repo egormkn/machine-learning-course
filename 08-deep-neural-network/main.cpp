@@ -5,8 +5,6 @@
 #include <memory>
 #include <cmath>
 #include <random>
-#include <algorithm>
-#include <ctime>
 
 using namespace std;
 
@@ -149,14 +147,14 @@ public:
         auto network = make_unique<deep_network>(layers);
 
         // Train network
+        uniform_int_distribution<size_t> distribution(0, objects.size() - 1);
         clock_t start_time = clock();
-        while (clock() - start_time < 8500) {
-            shuffle(objects.begin(), objects.end(), random_generator);
-            for (const object &object : objects) {
-                double output = network->train_forward(object);
-                network->train_backward(output, object.get_class());
-                network->correct_weights(object);
-            }
+        for (size_t object_id = distribution(random_generator);
+             clock() - start_time < 9500; object_id = distribution(random_generator)) {
+            const object &object = objects[object_id];
+            double output = network->train_forward(object);
+            network->train_backward(output, object.get_class());
+            network->correct_weights(object);
         }
 
         return network;
