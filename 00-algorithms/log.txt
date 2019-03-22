@@ -1,0 +1,8 @@
+RFECV + SVC good = 376 total = 664 accuracy = 56.62650602409639 %
+RFECV + KNN good = 292 total = 664 accuracy = 43.97590361445783 %
+SelectKBest + SVC good = 418 total = 664 accuracy = 62.951807228915655 %
+SelectKBest + KNN good = 425 total = 664 accuracy = 64.00602409638554 %
+RFECV + SVC + OneHotEncoder good = 395 total = 664 accuracy = 59.48795180722891 %
+RFECV + KNN + OneHotEncoder good = 307 total = 664 accuracy = 46.234939759036145 %
+SelectKBest + SVC + OneHotEncoder good = 403 total = 664 accuracy = 60.69277108433735 %
+SelectKBest + KNN + OneHotEncoder good = 430 total = 664 accuracy = 64.7590361445783 %
