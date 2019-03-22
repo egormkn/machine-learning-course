@@ -1,10 +1,36 @@
 #include <iostream>
 #include <fstream>
+#include <vector>
+#include <numeric>
+#include <cmath>
 
 using namespace std;
 
 void solve() {
-    // TODO
+    /**
+     * k - number of unique values of feature x
+     * n - number of objects
+     */
+    unsigned k, n;
+    cin >> k >> n;
+
+    vector<vector<int>> grouped_objects(k);
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned x;
+        int y;
+        cin >> x >> y;
+        grouped_objects[x - 1].push_back(y);
+    }
+
+    double answer = 0.0;
+    for (const vector<int> &objects : grouped_objects) {
+        double y_mean = accumulate(objects.begin(), objects.end(), 0.0) / objects.size();
+        for (int y : objects) {
+            answer += pow(y - y_mean, 2) / n;
+        }
+    }
+
+    cout << answer << endl;
 }
 
 int main() {
@@ -23,6 +49,7 @@ int main() {
     cerr.rdbuf(nullptr);
 #endif
 
+    cout << fixed;
     solve();
     cout.flush();
 
